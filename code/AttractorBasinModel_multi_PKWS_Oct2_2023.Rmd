@@ -1,0 +1,805 @@
+---
+title: "Modeling sleeping site choice with the basin of attractor model"
+output:
+html_document: default
+html_notebook: default
+pdf_document: default
+---
+
+
+##Introduction:
+
+Here we use movement and sleeping site data to identify when and where we can preditct a groups final sleeping site. i.e., is there a basin of attraction around each sleeping site?
+
+```{r, message=FALSE, warning=FALSE}
+library(rstan)
+library(ggplot2)
+library(sp)
+library(brms)
+#library(raster)
+#library(rgdal)
+library(mgcv)
+library(itsadug)
+library(scales)
+library(data.table)
+library(dplyr)
+#library("plot3Drgl")
+#library(plot3D)
+#library(rgl)
+library(car)
+library(scatterplot3d)
+library(ggmap)
+library(lubridate)
+library(adehabitatLT)
+```
+
+
+
+```{r}
+#write.csv(df.sub.sub,"obs_tracks_1h_sleepsite.csv", row.names = F)
+
+#Read the data
+tracks <- read.csv("data/obs_tracks_1h_sleepsite.csv")
+
+#visualize the data
+ggplot(tracks, aes(x=x,y=y,col=factor(sleepSite) )) + geom_point() 
+```
+
+```{r}
+
+#model using multinomial
+fit.sleepsite <- gam(list(sleepSite.target ~ te(x,y,t,bs=c("tp","tp"),k=c(25,5),d=c(2,1)),
+                          ~ te(x,y,t,bs=c("tp","tp"),k=c(25,5),d=c(2,1)),
+                          ~ te(x,y,t,bs=c("tp","tp"),k=c(25,5),d=c(2,1)),
+                          ~ te(x,y,t,bs=c("tp","tp"),k=c(25,5),d=c(2,1))),
+                     data=tracks, family = multinom(K=4))
+
+summary(fit.sleepsite)
+#plot(fit.sleepsite,pages=1)
+gam.check(fit.sleepsite)
+```
+
+
+#Visualize the predictions
+
+Predict for hourly blocks, and visualize in 3d
+```{r}
+
+#set spatio-temporal sampling
+time.seq <- seq(6,17,by=0.2)
+grd.all <- data.frame(x=-1,y=-1,t=-1)
+for(i in time.seq){
+  
+  #Time
+  time.pred <- i
+  
+  #create grid surrounding the observed points
+  x.range <- as.numeric(c(min(tracks$x), max(tracks$x)))  
+  y.range <- as.numeric(c(min(tracks$y), max(tracks$y) ))  
+  
+  #x.range <- as.numeric(c(78000, 80000))  
+  #y.range <- as.numeric(c(18000, 22000 ))  
+  grd <- expand.grid(x = seq(from = x.range[1], to = x.range[2], by = 100), y = seq(from = y.range[1], 
+                                                                                   to = y.range[2], by = 100))  
+  #What time slices to look at?
+  grd$t <- time.pred
+  
+  #keep each time period
+  grd.all <- rbind(grd.all, grd)
+  
+}
+grd.all <- grd.all[-1,]
+
+
+#prediction for each slice 
+pp<-predict(fit.sleepsite, newdata = grd.all ,type="response", se.fit=T)
+
+#get the predictions 
+pc <- apply(pp$fit,1,function(x) which(max(x)==x)[1])
+
+#remove the predictions with high uncertainty
+pc.final <- vector()
+pc.final.probs <- vector()
+for(i in 1:length(pc)){
+  pc.prob <- pp$fit[i,pc[i]]
+  pc.se <- pp$se.fit[i,pc[i]]
+  pc.final[length(pc.final)+1] <- ifelse(pc.prob - 1.96*pc.se > 0 & pc.prob>0.80 ,pc[i],NA)
+  pc.final.probs[length(pc.final.probs)+1] <- pc.prob
+}
+
+#add predictions
+grd.all$pc <- pc.final
+grd.all$pc.prob <- pc.final.probs
+
+#subset
+grd.all.sub <- grd.all %>% filter(pc != 1)
+
+
+#try exporting it as dynamic
+library(scatterplot3d)
+#library(knitr)
+#library(rgl)
+#knit_hooks$set(webgl = hook_webgl)
+#scatter3d(x=grd.all.sub$x, y=grd.all.sub$y, z=grd.all.sub$t, groups = as.factor(grd.all.sub$pc), zlab = "time", xlab="x coord", ylab="y cood", surface = F)
+
+
+###plot 3d
+#graphics.off()
+png(filename = "SleepSite_Basin_HR.png", width = 8, height = 6, units = "in", res = 300)
+par(mai = c(0.5, 0.5, 0.5, 0.5))
+scatterplot3d(x=grd.all.sub$x, y=grd.all.sub$y, z=grd.all.sub$t, color = c("yellow","green","blue","red", "orange")[grd.all.sub$pc], zlab = "time", xlab="x coord", ylab="y cood", surface = F, angle=20)
+dev.off()
+
+
+###export to shapefile
+#library(rgdal)
+#grd.all.sub$mgrs <- paste0("47QQU",round(grd.all.sub$x),round(grd.all.sub$y))
+#lat.long<-mgrs_to_latlng(grd.all.sub$mgrs)
+#to.arc <- cbind(grd.all.sub,lat.long)
+#names(to.arc) <- c("MGRS_X","MGRS_Y","time","sleepSite","probS","mgrs1","mgrs2","lat", "long")
+#write.csv(to.arc, file="sleepPred.csv")
+#coordinates(to.arc)=c("long","lat")
+
+#proj4string(to.arc)<- CRS("+proj=longlat +ellps=evrst30 ")
+#proj4string(to.arc)<- CRS("+proj=longlat")
+#raster::shapefile(LLcoor, "sleepSiteBasins3.shp", overwrite=T)
+
+#to.arc@coords <- as.matrix(to.arc@data[c("Lon","Lat")])
+#to.arc@bbox   <- rbind(range(to.arc@coords[,1]),range(to.arc@coords[,2]))
+#library(ggmap)
+#ggplotly(to.arc, aes(x=long, y=lat)) + geom_point()
+#bas_map <- get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14)
+#plottest<-get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14) %>% ggmap() +
+#  geom_point(data = to.arc, aes(x = long, y = lat, col=factor(sleepSite) ), size = 3)
+
+#ggplotly(plottest)
+
+#ggplot(data = to.arc, aes(x = long, y = lat), color = 'red', size = 3) + geom_point() 
+
+```
+
+
+
+Visualize movement predictability 2d
+```{r}
+
+plot.12<-get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14) %>% ggmap() +
+  geom_point(data = as.data.frame(to.arc[to.arc$time==12,]), aes(x = long, y = lat, col=factor(sleepSite) ), size = 3)+ theme(legend.position = "none")
+plot.12
+
+plot.12<-get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14) %>% ggmap() +
+  geom_point(data = as.data.frame(to.arc[to.arc$time==12,]), aes(x = long, y = lat, col=factor(sleepSite) ), size = 3)+ theme(legend.position = "none")
+plot.12
+
+
+plot.13<-get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14) %>% ggmap() +
+  geom_point(data = filter(to.arc, time==13), aes(x = long, y = lat, col=factor(sleepSite) ), size = 3)+ theme(legend.position = "none")
+
+plot.14<-get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14) %>% ggmap() +
+  geom_point(data = filter(to.arc, time==14), aes(x = long, y = lat, col=factor(sleepSite) ), size = 3)+ theme(legend.position = "none")
+
+plot.15<-get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14) %>% ggmap() +
+  geom_point(data = filter(to.arc, time==15), aes(x = long, y = lat, col=factor(sleepSite) ), size = 3)+ theme(legend.position = "none")
+
+plot.16<-get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14) %>% ggmap() +
+  geom_point(data = filter(to.arc, time==16), aes(x = long, y = lat, col=factor(sleepSite) ), size = 3)+ theme(legend.position = "none")
+
+#cowplot::plot_grid(plot.13, plot.14, plot.15, plot.16) 
+cowplot::plot_grid(plot.10, plot.12, plot.14, plot.16) 
+```
+
+
+plot of tracks used
+```{r}
+#sleep sites
+df.sleepTrees <- as.data.frame(matrix(data=c(78756,78783,79628,80419,20445,20806,20838,21595), nrow=4, ncol=2))
+names(df.sleepTrees)<-c("x","y")
+
+#obs
+tracks.com <- tracks[complete.cases(tracks),]
+tracks.com$sleepSite.target2 <- tracks.com$sleepSite.target
+tracks.com$sleepSite.target2 <- ifelse(tracks.com$sleepSite.target2==2,3,ifelse(tracks.com$sleepSite.target2==3,2,tracks.com$sleepSite.target2))
+ggplot(tracks.com, aes(x=x,y=y,col=factor(sleepSite.target2) )) + geom_point() + geom_path(aes(group=date)) + scale_color_manual(values=c("grey40","green","red","blue", "orange") ) +theme_bw()+ geom_point(data=df.sleepTrees, aes(x=x,y=y), color="black",size=4) + theme(legend.position = "none")
+
+#sim
+ggplot(trak_with_sleep, aes(x=x,y=y, color=factor(sleepSite.target) )) + geom_point() + geom_path(aes(group=id))+ scale_color_manual(values=c("grey40","green","red","blue", "orange") ) + theme_bw()+
+  geom_point(data=df.sleepTrees, color="black",size=4)+ theme(legend.position = "none")
+```
+
+
+plot of area using mesh
+```{r plot mesh}
+
+#set spatio-temporal sampling
+time.seq <- seq(6,17,by=0.2)
+grd.all <- data.frame(x=-1,y=-1,t=-1)
+for(i in time.seq){
+  
+  #Time
+  time.pred <- i
+  
+  #create grid surrounding the observed points
+  x.range <- as.numeric(c(min(tracks$x), max(tracks$x)))  
+  y.range <- as.numeric(c(min(tracks$y), max(tracks$y) ))  
+  
+  #x.range <- as.numeric(c(78000, 80000))  
+  #y.range <- as.numeric(c(18000, 22000 ))  
+  grd <- expand.grid(x = seq(from = x.range[1], to = x.range[2], by = 100), y = seq(from = y.range[1], 
+                                                                                   to = y.range[2], by = 100))  
+  #What time slices to look at?
+  grd$t <- time.pred
+  
+  #keep each time period
+  grd.all <- rbind(grd.all, grd)
+  
+}
+grd.all <- grd.all[-1,]
+
+
+#prediction for each slice 
+pp<-predict(fit.sleepsite, newdata = grd.all ,type="response", se.fit=T)
+
+#get the predictions 
+pc <- apply(pp$fit,1,function(x) which(max(x)==x)[1])
+
+#remove the predictions with high uncertainty
+pc.final <- vector()
+pc.final.probs <- vector()
+for(i in 1:length(pc)){
+  pc.prob <- pp$fit[i,pc[i]]
+  pc.se <- pp$se.fit[i,pc[i]]
+  pc.final[length(pc.final)+1] <- ifelse(pc.prob - 1.96*pc.se > 0 & pc.prob>0.80 ,pc[i],NA)
+  pc.final.probs[length(pc.final.probs)+1] <- pc.prob
+}
+
+#add predictions
+grd.all$pc <- pc.final
+grd.all$pc.prob <- pc.final.probs
+
+#subset
+grd.all.sub <- grd.all %>% filter(pc != 1)
+
+grd.all.sub$x <- as.numeric(scale(grd.all.sub$x))
+grd.all.sub$y <- as.numeric(scale(grd.all.sub$y))
+grd.all.sub$t <- as.numeric(scale(grd.all.sub$t))
+
+
+library(rgl)
+library(misc3d)
+bunny.dens <- kde3d(grd.all.sub[,"x"],grd.all.sub[,"y"],grd.all.sub[,"t"], n=150) # I chose lim values manually
+
+plot(bunny.dens)
+contour3d(bunny.dens$d, level = 0.08, 
+    color = "green", color2 = "green", smooth=500)
+
+
+
+```
+
+
+
+#Simulate using empirically fitted corelated bias random movements
+
+###Outline
+#####1. fit a circular cirular model to the tracks (predicting both distance traveled and angle of travel, as well as their correlation).
+
+#####2. simulate data using circular circular model, with a bias towards the nearest sleep site after 15:00. Stop sim at 18:00
+
+#####3. model the basin of attractors that result.
+
+#####4. take the difference in those 2d plots to highlight the differences in space and time.
+
+#####5. Are there shared characteristics between the sites?
+
+Calculate step lengths and turn angles
+```{r}
+
+library(adehabitatLT)
+library(sp)
+
+#get tracks data into spatial data
+merge <- tracks[complete.cases(tracks),]
+merge$date_time <- lubridate::dmy(merge$date) + lubridate::hours(floor(merge$t) ) + lubridate::minutes( round((merge$t-floor(merge$t))*60) )
+coordinates(merge) <- ~x + y
+
+ltraj <- as.ltraj(coordinates(merge),date=as.POSIXct(merge$date_time),id=1)
+
+#take a look
+plot(ltraj)
+plotltr(ltraj, "dt/3600")
+
+ltraj.sub<-cutltraj(ltraj, "dt > 3600+60*30")
+plot(ltraj.sub)
+
+burst.data<-ld(ltraj.sub)
+burst.data
+```
+
+Get the data ready for stan
+```{r}
+
+#get as dataframe
+df.angle<-burst.data
+
+#get the previous steps measures
+df.angle <- df.angle %>% group_by(id) %>% mutate(prev.angle = lag(abs.angle), prev.dist = lag(dist),prev.t.dist = lag(dt))
+
+#keep only complete cases
+df.angle<-df.angle[complete.cases(df.angle),]
+
+#fix the time
+#df.angle[df.angle$prev.t.dist>1.5*60*60,]<-NA
+#df.angle<-df.angle[complete.cases(df.angle),]
+
+#take a look
+summary(df.angle$dist)
+summary(df.angle$prev.dist)  
+
+
+```
+
+
+```{r}
+data.rm<-list( Ni =  nrow(df.angle),
+               Nj = length(unique(df.angle$id)),
+               id = as.numeric(as.character(df.angle$id)),
+               a = df.angle$abs.angle,
+               pa = df.angle$prev.angle,
+               d = as.numeric(scale(df.angle$dist, center = F)),
+               pd = as.numeric(scale(df.angle$prev.dist, center = F)),
+               dt = as.numeric( scale(df.angle$dt, center=F) )
+)
+
+```
+
+The correlated random walk model (autocorrelated N and theta)
+```{r}
+
+model.rm = '
+
+data {
+    int Ni;          //Number of observations
+    int Nj;          //Number of individuals
+    vector [Ni] id;  //Individual id
+
+    vector [Ni] a;   //Observed angle
+    vector [Ni] pa;  //previous angle
+    vector [Ni] d;   //distance traveled
+    vector [Ni] pd;  //previous distance traveled
+    vector [Ni] dt;  //time since last obs
+}
+
+transformed data {
+
+vector[Ni] py;
+vector[Ni] px;
+
+for(i in 1:Ni){
+
+ py[i] = sin(pa[i]);
+ px[i] = cos(pa[i]);
+
+}
+
+}
+
+parameters {
+    unit_vector [2] mu_vec;
+    real <lower = 0> kappa;
+    real b_a;
+    real mu_d;
+    real b_d;
+    real b_t;
+    real<lower=0> sigma;
+}
+
+transformed parameters {
+
+    vector[Ni] a_hat;
+    vector[Ni] d_hat;
+
+    d_hat = mu_d + b_d*pd + b_t*dt;
+
+    for(i in 1:Ni){
+          a_hat[i] = atan2(mu_vec[2] + b_a*py[i], mu_vec[1] + b_a*px[i]);
+    }
+}
+
+model {
+    kappa ~  normal (0, 1);
+    sigma ~  normal (0, 1);
+    b_a ~ normal(0,1);
+    b_d ~ normal(0,1);
+    mu_d ~ normal(0,1);
+
+    a ~ von_mises (a_hat, kappa);
+    d ~ lognormal(d_hat, sigma);
+}
+
+'
+```
+
+
+data.rm
+```{r}
+fit.rm <- stan(model_code = model.rm, data = data.rm, iter=500, chains=4, cores=4, init_r=0.1, control=list(adapt_delta=0.99, max_treedepth=12))
+```
+
+
+```{r}
+print(fit.rm, pars = c("b_a","kappa","b_d","mu_d","b_t", "sigma"))
+#pairs(fit.rm, pars = c("b_a","kappa","b_d","mu_d", "sigma"))
+#traceplot(fit.rm, pars = c("b_a","kappa","b_d","mu_d", "sigma"))
+```
+
+
+#2) simulate some data to compare
+
+Simulated data to make predictions
+```{r}
+library(brms)
+
+post.rm<-rstan::extract(fit.rm)
+
+sim_one_day <-function(x_start,y_start, post=post.rm){
+  
+  #back dist
+  back.dist.prev <- sd(df.angle$prev.dist)
+  back.dist.obs <- sd(df.angle$dist)
+  
+  #starting direction and distance
+  a_start = rvon_mises(1,atan2(mean(post$mu_vec[2]),mean(post$mu_vec[1]) ),0.01 )
+  d_start = min(rlnorm(1, mean(post$mu_d), mean(post$sigma) ) * back.dist.obs,max(df.angle$dist) )
+  
+  #sample a trajectory length and start time
+  unique.track <- unique(tracks$date)
+  start.df <-tracks %>% filter(date == unique.track[sample(1:length(unique.track),1)] )
+  #start.time<-hour(round_date( start.df[1,]$date, "hour"))
+  start.time<-round(start.df$t)[1]
+  numb_setps = max(nrow(start.df),2)
+  
+  #start of sim data
+  sim.data <- data.frame(x=x_start,y=y_start,time=start.time,id=1, a=a_start,d=d_start   )
+    
+  #simulate numb_setps
+  for( i in 2:numb_setps){
+    
+    post_r <- sample(1:nrow(post$mu_vec),1)
+    
+    mean_a <- atan2(post$mu_vec[post_r,2] + post$b_a[post_r] * sin(sim.data$a[i-1]), post$mu_vec[post_r,1] + post$b_a[post_r] * cos(sim.data$a[i-1]) )  
+    
+    mean_d <- post$mu_d[post_r] + post$b_d[post_r]*(sim.data$d[i-1]/back.dist.prev) + post$b_t[post_r]*1
+    
+    obs_angle <- rvon_mises(1,mean_a, post$kappa[post_r]) 
+    obs_dist  <- (rlnorm(1,mean_d, post$sigma[post_r]))*back.dist.obs
+    
+    #update x and y
+    x = sim.data$x[i-1] + cos(obs_angle)*obs_dist
+    y = sim.data$y[i-1] + sin(obs_angle)*obs_dist
+    
+    t = sim.data$time[i-1] + 1
+    
+    #Join to dataframe and continue
+    df.temp <- data.frame(x=x,y=y,time=t, id=1,a=obs_angle,d=obs_dist)
+    sim.data <- rbind(sim.data,df.temp)
+    
+    #ggplot(sim.data, aes(x=x,y=y)) + geom_line()
+    
+  }
+
+  return (sim.data)
+  
+  
+  
+}
+```
+
+
+Just a test
+```{r}
+for(i in 1:1000){
+  df.sim1 <- sim_one_day(x=sleepingSite[1], y=sleepingSite[2])
+}
+```
+
+
+Run the same number of observed tracks with the simulation model
+```{r}
+#setup data frame to store data
+trak_with_sleep <- data.frame(x=-1,y=-1, time=-1,id=1,a=-1,d=-1, sleepsite=-1)
+track.id = 1
+
+#set sleeping sites to choose from
+actualSleepingSites <- matrix(data=c(78756,78783,79628,80419,20445,20806,20838,21595), nrow=4, ncol=2)
+
+#randomly start at one sleeping site
+sleepingSite <- actualSleepingSites[sample(1:4,1),]
+
+#simulate movement
+for(i in 1:1092){      #length(unique(tracks$date))...sum(numb.tracks.per.sleepsite[,2])
+  
+  #simulate one movement
+  df.sim1 <- sim_one_day(x=sleepingSite[1], y=sleepingSite[2])
+  x.last<-df.sim1[nrow(df.sim1),]$x
+  y.last<-df.sim1[nrow(df.sim1),]$y
+  
+  #found sleep site nearby the end of the track
+  retval = FALSE
+  dist.min=500
+  siteChoosen = 0
+  
+  #look for closest sleeping site from the end of the track
+  for(j in 1:nrow(actualSleepingSites) ){
+    
+    #calculate distance to all sites  
+    dist.temp <- (((actualSleepingSites[j,1]-x.last)^2) + ((actualSleepingSites[j,2]-y.last)^2) )^0.5
+    
+    #if the track is within 500m of the j sleeping site
+    if(dist.temp < 500 & dist.min > dist.temp ){
+      
+      retval = TRUE
+      siteChoosen = j
+      dist.min=dist.temp
+      
+    } 
+  }
+  
+  #no sleep site was found
+  if(retval==FALSE){
+    df.sim1$sleepsite = 0
+    df.sim1$id=track.id
+    track.id = track.id + 1
+    trak_with_sleep <- rbind(trak_with_sleep, df.sim1)
+    print(track.id)
+    print(paste0("sleepsite = 0, at a dist = ",dist.temp))
+    
+    #random sleep site
+    sleepingSite <- actualSleepingSites[sample(1:4,1),]
+    
+    #yes sleep site found
+  } else {
+    
+    df.sim1$sleepsite = siteChoosen
+    df.sim1$id=track.id
+    track.id = track.id + 1
+    trak_with_sleep <- rbind(trak_with_sleep, df.sim1)
+    print(track.id)
+    print(paste0("sleepsite = ",siteChoosen," at a dist = ",dist.temp))
+    
+    #change sleep sites
+    sleepingSite <- actualSleepingSites[siteChoosen,]
+  }
+}
+
+
+trak_with_sleep<- trak_with_sleep[-1,]
+names(trak_with_sleep)[3] <- "t"
+names(trak_with_sleep)[7] <- "sleepSite.target"
+
+df.sleepTrees <- as.data.frame(matrix(data=c(78756,78783,79628,80419,20445,20806,20838,21595), nrow=4, ncol=2))
+names(df.sleepTrees)<-c("x","y")
+ggplot(trak_with_sleep, aes(x=x,y=y, color=id)) + geom_point() + geom_path() + theme_classic()+
+  geom_point(data=df.sleepTrees, color="red",size=2)
+```
+
+
+add background prior 
+```{r}
+#add background priors
+x.range.na <- as.numeric(c(min(trak_with_sleep$x)-50, max(trak_with_sleep$x)+50))  
+y.range.na <- as.numeric(c(min(trak_with_sleep$y)-50, max(trak_with_sleep$y)+50))  
+grd <- expand.grid(x = seq(from = x.range.na[1], to = x.range.na[2], by =100), y = seq(from = y.range.na[1], 
+                                                                                               to = y.range.na[2], by = 100))  
+#What time slices to look at?
+grd$t <- runif(nrow(grd),min=4,max=19) #little larger than the actual time
+
+grd.df <- data.frame(x=grd$x,y=grd$y,t=grd$t, id=0,a=-1,d=-1,sleepSite.target=0)
+trak_with_sleep.grid <- rbind(trak_with_sleep,grd.df)
+
+table(trak_with_sleep.grid$sleepSite.target)
+
+#plot tracks coloured by where the troop ends up at night
+ggplot(trak_with_sleep.grid, aes(x=x,y=y,col=factor(sleepSite.target) )) + geom_point() 
+
+```
+
+Comapre sample sizes
+```{r}
+#observed
+tracks[-c( (nrow(tracks)-1960):nrow(tracks)),]%>% group_by(sleepSite.target) %>% tally()
+sum((tracks[-c( (nrow(tracks)-1960):nrow(tracks)),] %>% group_by(sleepSite.target) %>% tally())$n)
+
+
+#simulated
+trak_with_sleep %>% group_by(sleepSite.target) %>% tally()
+sum((trak_with_sleep %>% group_by(sleepSite.target) %>% tally())$n)
+```
+
+
+
+#MODEL BASINS
+```{r}
+
+trak_with_sleep.grid %>% group_by(sleepSite.target) %>% tally()
+
+#model using multinomial
+fit.sleepsite.sim <- gam(list(sleepSite.target ~ te(x,y,t,bs=c("tp","tp"),k=c(25,5),d=c(2,1)),
+                          ~ te(x,y,t,bs=c("tp","tp"),k=c(25,5),d=c(2,1)),
+                          ~ te(x,y,t,bs=c("tp","tp"),k=c(25,5),d=c(2,1)),
+                          ~ te(x,y,t,bs=c("tp","tp"),k=c(25,5),d=c(2,1))),
+                     data=trak_with_sleep.grid, family = multinom(K=4))
+
+summary(fit.sleepsite.sim)
+#plot(fit.sleepsite,pages=1)
+gam.check(fit.sleepsite.sim)
+```
+
+
+
+
+
+#Visualize the predictions
+
+Predict for hourly blocks, and visualize in 3d
+
+```{r}
+
+#prediction for each slice 
+pp.sim<-predict(fit.sleepsite.sim, newdata = grd.all ,type="response", se.fit=T)
+
+#get the predictions 
+pc.sim <- apply(pp.sim$fit,1,function(x) which(max(x)==x)[1])
+
+#remove the predictions with high uncertainty
+pc.final.sim <- vector()
+pc.final.probs.sim <- vector()
+for(i in 1:length(pc.sim)){
+  pc.prob <- pp.sim$fit[i,pc.sim[i]]
+  pc.se <- pp.sim$se.fit[i,pc.sim[i]]
+  pc.final.sim[length(pc.final.sim)+1] <- ifelse(pc.prob - 1.96*pc.se > 0 & pc.prob>0.80 ,pc.sim[i],NA)
+  pc.final.probs.sim[length(pc.final.probs.sim)+1] <- pc.prob
+}
+
+#add predictions
+grd.all$pc.sim <- pc.final.sim
+grd.all$pc.prob.sim <- pc.final.probs.sim
+
+#subset
+grd.all.sub.sim <- grd.all %>% filter(pc.sim != 1)
+
+####try exporting it as dynamic
+#library(knitr)
+#library(rgl)
+#knit_hooks$set(webgl = hook_webgl)
+#scatter3d(x=grd.all.sub.sim$x, y=grd.all.sub.sim$y, z=grd.all.sub.sim$t, groups = as.factor(grd.all.sub.sim$pc.sim), zlab = "time", xlab="x coord", ylab="y cood", surface = F)
+
+###plot 3d
+library(scatterplot3d)
+#graphics.off()
+png(filename = "SleepSite_Basin_sim.png", width = 8, height = 6, units = "in", res = 300)
+par(mai = c(0.5, 0.5, 0.5, 0.5))
+scatterplot3d(x=grd.all.sub.sim$x, y=grd.all.sub.sim$y, z=grd.all.sub.sim$t, color = c("yellow","green","red","blue", "orange")[grd.all.sub.sim$pc], zlab = "time", xlab="x coord", ylab="y cood", surface = F, angle=20, zlim=c(8,18))
+dev.off()
+
+#export to shapefile
+#library(rgdal)
+#grd.all.sub$mgrs <- paste0("47QQU",grd.all.sub$x,grd.all.sub$y)
+#lat.long<-mgrs_to_latlng(grd.all.sub$mgrs)
+#to.arc <- cbind(grd.all.sub,lat.long)
+#names(to.arc) <- c("MGRS_X","MGRS_Y","time","sleepSite","probS","mgrs1","mgrs2","lat", "long")
+#write.csv(to.arc, file="sleepPred.csv")
+#coordinates(to.arc)=~lat+long
+
+#proj4string(to.arc)<- CRS("+proj=longlat +ellps=evrst30 ")
+#proj4string(to.arc)<- CRS("+proj=longlat")
+#raster::shapefile(LLcoor, "sleepSiteBasins2.shp", overwrite=T)
+
+#to.arc@coords <- as.matrix(to.arc@data[c("Lon","Lat")])
+#to.arc@bbox   <- rbind(range(to.arc@coords[,1]),range(to.arc@coords[,2]))
+#library(ggmap)
+#ggplotly(to.arc, aes(x=long, y=lat)) + geom_point()
+#bas_map <- get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14)
+#plottest<-get_map(location=c(lon = mean(to.arc$long), lat=mean(to.arc$lat)), maptype = "satellite", zoom = 14) %>% ggmap() +
+#  geom_point(data = to.arc, aes(x = long, y = lat, col=factor(sleepSite) ), size = 3)
+
+#ggplotly(plottest)
+
+#ggplot(data = to.arc, aes(x = long, y = lat), color = 'red', size = 3) + geom_point() 
+
+```
+
+Plot the difference between the two basins
+```{r}
+
+grd.all.diff <- grd.all
+
+#calculate difference in probability
+grd.all.diff$diff_prob <- grd.all.diff$pc.prob- grd.all.diff$pc.prob.sim
+
+#calulate difference in classes
+grd.all.diff$pc0 <- ifelse(is.na(grd.all.diff$pc),-99,grd.all.diff$pc)
+grd.all.diff$pc.sim0 <- ifelse(is.na(grd.all.diff$pc.sim),-99,grd.all.diff$pc.sim)
+grd.all.diff$diff_cat_na <- ifelse(grd.all.diff$pc0 == grd.all.diff$pc.sim0,grd.all.diff$pc.sim0,paste0(grd.all.diff$pc.sim0,"-",grd.all.diff$pc0))
+
+table(grd.all.diff$diff_cat)
+table(grd.all.diff$diff_cat_na)
+
+
+#table(grd.all.diff.sub$diff_cat_na)
+#levels(as.factor(grd.all.diff.sub$diff_cat_na))
+
+#greater/less than random (some diff)
+grd.all.diff.sub <- grd.all.diff %>% filter(diff_cat_na != "1", diff_cat_na!="-99", diff_cat_na!="1--99",diff_cat_na!="-99-1")
+
+#recode
+grd.all.diff.sub$gtlt.random <- grd.all.diff.sub$diff_cat_na
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="-99-2"] <- "gt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="-99-3"] <- "gt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="-99-5"] <- "gt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="1-2"] <- "gt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="1-5"] <- "gt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="2--99"] <- "lt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="3--99"] <- "lt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="4--99"] <- "lt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="5--99"] <- "lt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="5-1"] <- "lt"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="5"] <- "same"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="2"] <- "same"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="3-4"] <- "same"
+grd.all.diff.sub$gtlt.random[grd.all.diff.sub$gtlt.random=="4-3"] <- "same"
+
+table(grd.all.diff.sub$gtlt.random)
+
+scatter3d(x=grd.all.diff.sub$x, y=grd.all.diff.sub$y, z=grd.all.diff.sub$t, groups = as.factor(grd.all.diff.sub$gtlt.random), zlab = "time", xlab="x coord", ylab="y cood", surface = F,surface.col=c("red","blue","grey50"))
+
+# png(filename = "SleepSite_Basin_sim_diff.png", width = 8, height = 6, units = "in", res = 300)
+# par(mai = c(0.5, 0.5, 0.5, 0.5))
+# scatterplot3d(x=grd.all.diff.sub$x, y=grd.all.diff.sub$y, z=grd.all.diff.sub$t, color = c("red","blue","grey50")[as.numeric(as.factor(grd.all.diff.sub$gtlt.random))], zlab = "time", xlab="x coord", ylab="y cood", surface = F, angle=20, zlim=c(8,18))
+# dev.off()
+```
+
+
+
+```{r}
+grd.all.diff.sub$mgrs <- paste0("47QQU",round(grd.all.diff.sub$x),round(grd.all.diff.sub$y))
+lat.long<-mgrs_to_latlng(grd.all.diff.sub$mgrs)
+to.arc.diff <- cbind(grd.all.diff.sub,lat.long)
+names(to.arc.diff) <- c("MGRS_X","MGRS_Y","time","sleepSite","probS","pc.sim","pc.prob.sim","diff.prob","pc0","pc.sim0","diff_cat","gtlt.random","mgrs","mgrs0","lat","long")
+#write.csv(to.arc, file="sleepPred.csv")
+coordinates(to.arc.diff)=c("long","lat")
+
+proj4string(to.arc.diff)<- CRS("+proj=longlat +ellps=evrst30 ")
+
+#convert sleepsite coords
+df.sleepTrees <- as.data.frame(matrix(data=c(78756,78783,79628,80419,20445,20806,20838,21595), nrow=4, ncol=2))
+df.sleepTrees$mgrs <- paste0("47QQU",round(df.sleepTrees[,1]),round(df.sleepTrees[,2]))
+lat.long<-mgrs_to_latlng(df.sleepTrees$mgrs)
+df.sleepTrees<-cbind(df.sleepTrees,lat.long)
+
+```
+
+Visualize in 2d
+```{r}
+library(ggmap)
+
+plot.diff.11<-get_map(location=c(lon = mean(to.arc.diff$long)+0.002, lat=mean(to.arc.diff$lat))+0.001, maptype = "satellite", zoom = 15) %>% ggmap() + geom_point(data = as.data.frame(to.arc.diff[to.arc.diff$time==11,]), aes(x = long, y = lat, color=as.data.frame(to.arc.diff[to.arc.diff$time==11,])$gtlt.random), size = 2,shape=1)+
+  geom_point(data=lat.long, aes(x = lng, y = lat),color="white", size=4) + scale_color_manual(values=c("orange", "#56B4E9","grey90" ))+ theme(legend.position = "none")
+
+#plot.diff.11
+
+plot.diff.13<-get_map(location=c(lon = mean(to.arc.diff$long)+0.002, lat=mean(to.arc.diff$lat))+0.001, maptype = "satellite", zoom = 15) %>% ggmap() + geom_point(data = as.data.frame(to.arc.diff[to.arc.diff$time==13,]), aes(x = long, y = lat, color=as.data.frame(to.arc.diff[to.arc.diff$time==13,])$gtlt.random), size = 2,shape=1)+
+  geom_point(data=lat.long, aes(x = lng, y = lat),color="white", size=4)+ scale_color_manual(values=c("orange", "#56B4E9","grey90" ))+ theme(legend.position = "none")
+#plot.diff.13
+
+plot.diff.15<-get_map(location=c(lon = mean(to.arc.diff$long)+0.002, lat=mean(to.arc.diff$lat))+0.001, maptype = "satellite", zoom = 15) %>% ggmap() + geom_point(data = as.data.frame(to.arc.diff[to.arc.diff$time==15,]), aes(x = long, y = lat, color=as.data.frame(to.arc.diff[to.arc.diff$time==15,])$gtlt.random), size = 2,shape=1)+
+  geom_point(data=lat.long, aes(x = lng, y = lat),color="white", size=4)+ scale_color_manual(values=c("orange", "#56B4E9","grey90" ))+ theme(legend.position = "none") 
+
+
+plot.diff.17<-get_map(location=c(lon = mean(to.arc.diff$long)+0.002, lat=mean(to.arc.diff$lat))+0.001, maptype = "satellite", zoom = 15) %>% ggmap() + geom_point(data = as.data.frame(to.arc.diff[to.arc.diff$time==17,]), aes(x = long, y = lat, color=as.data.frame(to.arc.diff[to.arc.diff$time==17,])$gtlt.random), size = 2,shape=1)+
+  geom_point(data=lat.long, aes(x = lng, y = lat),color="white", size=4)+ scale_color_manual(values=c("orange", "#56B4E9","grey90" ))+ theme(legend.position = "none") 
+
+#plot.diff.17
+
+cowplot::plot_grid(plot.diff.11,plot.diff.13,plot.diff.15,plot.diff.17, ncol=2)
+
+```
